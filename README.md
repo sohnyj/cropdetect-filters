@@ -79,13 +79,13 @@ It accepts the following parameters:
 - Find the video area surrounded by black borders, decoding with Vulkan:
 
   ```
-  ffmpeg -init_hw_device vulkan -hwaccel vulkan -hwaccel_output_format vulkan -i file.mkv -vf cropdetect_vulkan,metadata=mode=print -f null -
+  .\ffmpeg.exe -init_hw_device vulkan -hwaccel vulkan -hwaccel_output_format vulkan -i file.mkv -vf cropdetect_vulkan,metadata=mode=print -f null -
   ```
 
 - The same for frames decoded in software:
 
   ```
-  ffmpeg -init_hw_device vulkan=vk -filter_hw_device vk -i file.mkv -vf hwupload,cropdetect_vulkan,metadata=mode=print -f null -
+  .\ffmpeg.exe -init_hw_device vulkan=vk -filter_hw_device vk -i file.mkv -vf hwupload,cropdetect_vulkan,metadata=mode=print -f null -
   ```
 
 ### Commands
@@ -153,5 +153,5 @@ Autocrop	script-message toggle_autocrop	checked=p["user-data/filter/autocrop"]
 To print the detected area without the script:
 
 ```
-mpv --vo=gpu-next --gpu-api=vulkan --hwdec=vulkan --vf=lavfi=[cropdetect_vulkan] -v file.mkv
+.\mpv.com --vo=gpu-next --gpu-api=vulkan --hwdec=vulkan --vf=lavfi=[cropdetect_vulkan] -v file.mkv
 ```
