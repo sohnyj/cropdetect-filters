@@ -164,7 +164,7 @@ such as those of IMAX films.
 `mpv.conf`:
 
 ```
-gpu-context=winvk # or waylandvk; only winvk is tested
+gpu-context=winvk # or waylandvk or x11vk; only winvk is tested
 gpu-api=vulkan
 vo=gpu-next
 hwdec=vulkan # hwdec=nvdec or hwdec=vulkan,nvdec

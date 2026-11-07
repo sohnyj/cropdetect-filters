@@ -281,7 +281,7 @@ local function handle_toggle(command, suppress_osd)
     end
 
     if enable and not is_vulkan_context() then
-        msg.warn("Requires gpu-context=vulkan")
+        msg.warn("Requires gpu-context=winvk, waylandvk or x11vk")
         return
     end
 
