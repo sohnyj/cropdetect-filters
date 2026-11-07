@@ -21,8 +21,8 @@ options.read_options(autocrop_opts)
 
 local FILTER_LABEL = "@" .. autocrop_opts.label
 local UPLOAD_LABEL = "@" .. autocrop_opts.label .. "_upload"
-local FILTER_COMMAND = "%s:cropdetect_vulkan=limit=%s:reset=1:round=%d" -- reset=1 detects each frame on its own
-local UPLOAD_COMMAND = "%s:format=fmt=vulkan" -- uploads CUDA and software frames to Vulkan
+local FILTER_COMMAND = "%s:%s=limit=%s:reset=1:round=%d" -- reset=1 detects each frame on its own
+local UPLOAD_COMMAND = "%s:format=fmt=vulkan" -- uploads software frames to Vulkan
 local DEBOUNCE_SECONDS = 0.3 -- time a detected crop must stay unchanged before it is applied
 local MAX_DETECT_SPEED = 2.0 -- playback speed above which detection is skipped
 
@@ -48,7 +48,15 @@ local function is_vulkan_context()
 end
 
 local function needs_upload()
-    return mp.get_property("video-params/pixelformat") ~= "vulkan"
+    local hwdec = mp.get_property("hwdec-current", "no")
+    return hwdec == "no" or hwdec:sub(-#"-copy") == "-copy"
+end
+
+local function detection_filter()
+    if mp.get_property("hwdec-current") == "nvdec" then
+        return "cropdetect_cuda"
+    end
+    return "cropdetect_vulkan"
 end
 
 local function is_filter_active(label)
@@ -68,8 +76,8 @@ local function insert_autocrop()
     if needs_upload() then
         mp.commandv("vf", "append", string.format(UPLOAD_COMMAND, UPLOAD_LABEL))
     end
-    mp.commandv("vf", "append", string.format(FILTER_COMMAND,
-        FILTER_LABEL, autocrop_opts.cropdetect_limit, autocrop_opts.cropdetect_round))
+    mp.commandv("vf", "append", string.format(FILTER_COMMAND, FILTER_LABEL,
+        detection_filter(), autocrop_opts.cropdetect_limit, autocrop_opts.cropdetect_round))
 end
 
 local function clamp_autocrop(crop_size, crop_pos, min_size, max_size)

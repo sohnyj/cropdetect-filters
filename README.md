@@ -1,7 +1,8 @@
 # cropdetect-vk
 
-`cropdetect_vulkan`, a Vulkan port of FFmpeg's `cropdetect` filter, as a patch
-for FFmpeg, and an mpv script that uses it to crop black bars during playback.
+`cropdetect_vulkan` and `cropdetect_cuda`, Vulkan and CUDA ports of FFmpeg's
+`cropdetect` filter, as patches for FFmpeg, and an mpv script that uses them to
+crop black bars during playback.
 
 ## cropdetect_vulkan
 
@@ -97,26 +98,63 @@ This filter supports the following commands:
   The command accepts the same syntax of the corresponding option. If the
   specified expression is not valid, it is kept at its current value.
 
+## cropdetect_cuda
+
+Auto-detect the crop size on CUDA frames, such as those decoded with nvdec.
+
+It is the same filter as `cropdetect_vulkan` for CUDA: the metadata, the log
+line, the options and the commands are those of `cropdetect_vulkan` above. A
+CUDA kernel sums the luma plane per row and per column, and only these sums are
+read back.
+
+### Supported input
+
+- CUDA hardware frames only. Other frames have to be uploaded first, with
+  `hwupload_cuda` in FFmpeg.
+- The same formats as `cropdetect_vulkan`, and also `yuv444p10msb` and
+  `yuv444p12msb`, which nvdec outputs for 4:4:4 video.
+
+The hardware device comes from the input frames, so no device has to be passed
+to the filter graph.
+
+### Examples
+
+- Find the video area surrounded by black borders, decoding with nvdec:
+
+  ```
+  .\ffmpeg.exe -hwaccel cuda -hwaccel_output_format cuda -i file.mkv -vf cropdetect_cuda,metadata=mode=print -f null -
+  ```
+
 ## Building
 
-The patch is made against FFmpeg master. Apply it with the script next to it,
-which keeps working when FFmpeg changes the lines around the ones that
-register the filter:
+The patches are made against FFmpeg master, and either or both can be applied.
+Apply each with the script next to it, which keeps working when FFmpeg changes
+the lines around the ones that register the filter:
 
 ```
 cmake -DSOURCE_DIR=<ffmpeg> -P patch/ffmpeg-add-cropdetect_vulkan-filter.cmake
+cmake -DSOURCE_DIR=<ffmpeg> -P patch/ffmpeg-add-cropdetect_cuda-filter.cmake
 ```
 
-Then configure FFmpeg with `--enable-gpl` and `--enable-vulkan`, and have a
-SPIR-V compiler (`glslc`, `glslang` or `glslangValidator`) available at build
-time.
+Then configure FFmpeg with `--enable-gpl` and:
+
+- for `cropdetect_vulkan`, `--enable-vulkan`, with a SPIR-V compiler (`glslc`,
+  `glslang` or `glslangValidator`) available at build time;
+- for `cropdetect_cuda`, `--enable-cuda-llvm`, with clang and the
+  [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) available at
+  build time. `--enable-cuda-nvcc` works too, but needs `--enable-nonfree`,
+  which makes the binaries unredistributable.
+
+The CUDA patch also defines `__shared__` in `compat/cuda/cuda_runtime.h`, which
+the clang build of the kernels needs, as no kernel in FFmpeg used shared memory
+before.
 
 Patched binaries are at [sohnyj/mpv-winbuild](https://github.com/sohnyj/mpv-winbuild).
 
 ## mpv script
 
-`script/toggle_autocrop.lua` inserts `cropdetect_vulkan` and applies the
-detected area through `video-crop`.
+`script/toggle_autocrop.lua` inserts `cropdetect_vulkan` or `cropdetect_cuda`
+and applies the detected area through `video-crop`.
 
 It applies a dynamic crop that follows aspect ratio changes during playback,
 such as those of IMAX films.
@@ -129,12 +167,15 @@ such as those of IMAX films.
 gpu-context=winvk # or waylandvk; only winvk is tested
 gpu-api=vulkan
 vo=gpu-next
-hwdec=vulkan
+hwdec=vulkan # hwdec=nvdec or hwdec=vulkan,nvdec
 ```
 
-`gpu-api=vulkan` is required. With `hwdec=vulkan`, as above, **the frames are
-read on the GPU without being copied**, and no copy-back decoder is needed.
-With `hwdec=nvdec`, `nvdec-copy` or `no`, they are uploaded to Vulkan first.
+- `gpu-api=vulkan` is required.
+- With `hwdec=vulkan`, which uses `cropdetect_vulkan`, or `hwdec=nvdec`, which
+  uses `cropdetect_cuda`, **the frames are read on the GPU without being
+  copied**, and no copy-back decoder is needed.
+- With a `*-copy` decoder or the software decoder (`no`), they are uploaded to
+  Vulkan first.
 
 `input.conf`:
 

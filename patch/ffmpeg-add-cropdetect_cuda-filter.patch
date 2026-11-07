@@ -1,0 +1,723 @@
+From 37cbdb8cec661522dd995630ca1590463261eae0 Mon Sep 17 00:00:00 2001
+From: sohnyj <271139641+sohnyj@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 17:54:29 +0000
+Subject: [PATCH] avfilter: add cropdetect_cuda filter
+
+CUDA port of the black mode of cropdetect, for frames decoded with
+nvdec. A kernel sums up the luma plane per row and per column, and the
+borders are then searched on the CPU with the logic of vf_cropdetect.c,
+so that the metadata and the log output match those of the software
+filter.
+
+Each block stores its tile of samples in shared memory and sums up its
+rows and columns from there. compat/cuda/cuda_runtime.h now defines
+__shared__ for clang, as no kernel used shared memory so far.
+
+The samples are read through the pitch of the frame and shifted down to
+their code values, so the rows that a decoder allocates below the frame
+are not read, and the sums are copied to page-locked host memory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ compat/cuda/cuda_runtime.h        |   1 +
+ configure                         |   2 +
+ doc/filters.texi                  |  58 ++++
+ libavfilter/Makefile              |   2 +
+ libavfilter/allfilters.c          |   1 +
+ libavfilter/vf_cropdetect_cuda.c  | 468 ++++++++++++++++++++++++++++++
+ libavfilter/vf_cropdetect_cuda.cu |  89 ++++++
+ 7 files changed, 621 insertions(+)
+ create mode 100644 libavfilter/vf_cropdetect_cuda.c
+ create mode 100644 libavfilter/vf_cropdetect_cuda.cu
+
+diff --git a/compat/cuda/cuda_runtime.h b/compat/cuda/cuda_runtime.h
+index d08511f72a..35f0875ea1 100644
+--- a/compat/cuda/cuda_runtime.h
++++ b/compat/cuda/cuda_runtime.h
+@@ -26,6 +26,7 @@
+ // Common macros
+ #define __global__ __attribute__((global))
+ #define __device__ __attribute__((device))
++#define __shared__ __attribute__((shared))
+ #define __device_builtin__ __attribute__((device_builtin))
+ #define __align__(N) __attribute__((aligned(N)))
+ #define __inline__ __inline__ __attribute__((always_inline))
+diff --git a/configure b/configure
+index 3a0ee5ddfb..d00f2f9d86 100755
+--- a/configure
++++ b/configure
+@@ -4150,6 +4150,8 @@ coreimagesrc_filter_deps="coreimage appkit"
+ coreimagesrc_filter_extralibs="-framework OpenGL"
+ cover_rect_filter_deps="avcodec avformat gpl"
+ cropdetect_filter_deps="gpl"
++cropdetect_cuda_filter_deps="gpl ffnvcodec"
++cropdetect_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ deinterlace_qsv_filter_deps="libmfx"
+ deinterlace_qsv_filter_select="qsvvpp"
+ deinterlace_vaapi_filter_deps="vaapi"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index ec23628067..90b89ec9c5 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -28095,6 +28095,64 @@ JPEG (full) range
+ 
+ @end table
+ 
++@section cropdetect_cuda
++
++Auto-detect the crop size with the @samp{black} mode of the cropdetect
++filter, but implemented in CUDA so that it can work as part of a GPU
++accelerated pipeline with nvdec.
++
++The filter only accepts planar and semi-planar YUV input. It sets the same
++frame metadata and prints the same log lines as cropdetect, and passes the
++frames through unchanged.
++
++It accepts the following parameters:
++
++@table @option
++@item limit
++Set higher black value threshold, which can be optionally specified from
++nothing (0) to everything (255 for 8-bit based formats). An intensity value
++greater to the set value is considered non-black. It defaults to 24.
++You can also specify a value between 0.0 and 1.0 which will be scaled depending
++on the bitdepth of the pixel format.
++
++@item round
++The value which the width/height should be divisible by. It defaults to
++16. The offset is automatically adjusted to center the video. Use 2 to
++get only even dimensions (needed for 4:2:2 video). 16 is best when
++encoding to most video codecs.
++
++@item skip
++Set the number of initial frames for which evaluation is skipped.
++Default is 2. Range is 0 to INT_MAX.
++
++@item reset_count, reset
++Set the counter that determines after how many frames cropdetect will
++reset the previously detected largest video area and start over to
++detect the current optimal crop area. Default value is 0.
++
++This can be useful when channel logos distort the video area. 0
++indicates 'never reset', and returns the largest area encountered during
++playback.
++
++@item max_outliers
++Set the number of rows or columns brighter than @option{limit} that are
++tolerated before a border is set. Default is 0.
++@end table
++
++@subsection Commands
++
++The filter supports the @option{limit} command.
++
++@subsection Example
++
++@itemize
++@item
++Detect the crop area of a video decoded with nvdec:
++@example
++./ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 -vf "cropdetect_cuda,metadata=mode=print" -f null -
++@end example
++@end itemize
++
+ @anchor{overlay_cuda}
+ @section overlay_cuda
+ 
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index dc5c083f01..619e1e83d9 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -264,6 +264,8 @@ OBJS-$(CONFIG_CORR_FILTER)                   += vf_corr.o framesync.o
+ OBJS-$(CONFIG_COVER_RECT_FILTER)             += vf_cover_rect.o lavfutils.o
+ OBJS-$(CONFIG_CROP_FILTER)                   += vf_crop.o
+ OBJS-$(CONFIG_CROPDETECT_FILTER)             += vf_cropdetect.o edge_common.o
++OBJS-$(CONFIG_CROPDETECT_CUDA_FILTER)        += vf_cropdetect_cuda.o vf_cropdetect_cuda.ptx.o \
++                                                cuda/load_helper.o
+ OBJS-$(CONFIG_CUE_FILTER)                    += f_cue.o
+ OBJS-$(CONFIG_CURVES_FILTER)                 += vf_curves.o
+ OBJS-$(CONFIG_DATASCOPE_FILTER)              += vf_datascope.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 9f07bf83dc..e1279d0727 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -239,6 +239,7 @@ extern const FFFilter ff_vf_corr;
+ extern const FFFilter ff_vf_cover_rect;
+ extern const FFFilter ff_vf_crop;
+ extern const FFFilter ff_vf_cropdetect;
++extern const FFFilter ff_vf_cropdetect_cuda;
+ extern const FFFilter ff_vf_cue;
+ extern const FFFilter ff_vf_curves;
+ extern const FFFilter ff_vf_datascope;
+diff --git a/libavfilter/vf_cropdetect_cuda.c b/libavfilter/vf_cropdetect_cuda.c
+new file mode 100644
+index 0000000000..9963ea370c
+--- /dev/null
++++ b/libavfilter/vf_cropdetect_cuda.c
+@@ -0,0 +1,468 @@
++/*
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with FFmpeg; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++/**
++ * @file
++ * border detection filter
++ * CUDA port of the black mode of vf_cropdetect.c.
++ */
++
++#include "libavutil/cuda_check.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "cuda/load_helper.h"
++#include "filters.h"
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, s->hwctx->internal->cuda_dl, x)
++#define DIV_UP(a, b) ( ((a) + (b) - 1) / (b) )
++
++/* Must match the block size of the kernels in vf_cropdetect_cuda.cu. */
++#define BLOCK_X 32
++#define BLOCK_Y 32
++
++static const enum AVPixelFormat supported_formats[] = {
++    AV_PIX_FMT_YUV420P,
++    AV_PIX_FMT_YUV422P,
++    AV_PIX_FMT_YUV444P,
++    AV_PIX_FMT_YUV420P10,
++    AV_PIX_FMT_YUV422P10,
++    AV_PIX_FMT_YUV444P10,
++    AV_PIX_FMT_YUV444P10MSB,
++    AV_PIX_FMT_YUV420P12,
++    AV_PIX_FMT_YUV422P12,
++    AV_PIX_FMT_YUV444P12,
++    AV_PIX_FMT_YUV444P12MSB,
++    AV_PIX_FMT_YUV420P16,
++    AV_PIX_FMT_YUV422P16,
++    AV_PIX_FMT_YUV444P16,
++    AV_PIX_FMT_YUVA420P,
++    AV_PIX_FMT_YUVA422P,
++    AV_PIX_FMT_YUVA444P,
++    AV_PIX_FMT_YUVA420P10,
++    AV_PIX_FMT_YUVA422P10,
++    AV_PIX_FMT_YUVA444P10,
++    AV_PIX_FMT_YUVA422P12,
++    AV_PIX_FMT_YUVA444P12,
++    AV_PIX_FMT_YUVA420P16,
++    AV_PIX_FMT_YUVA422P16,
++    AV_PIX_FMT_YUVA444P16,
++    AV_PIX_FMT_NV12,
++    AV_PIX_FMT_NV16,
++    AV_PIX_FMT_NV24,
++    AV_PIX_FMT_P010,
++    AV_PIX_FMT_P012,
++    AV_PIX_FMT_P016,
++    AV_PIX_FMT_P210,
++    AV_PIX_FMT_P212,
++    AV_PIX_FMT_P216,
++    AV_PIX_FMT_P410,
++    AV_PIX_FMT_P412,
++    AV_PIX_FMT_P416,
++};
++
++typedef struct CropDetectCUDAContext {
++    const AVClass *class;
++
++    AVBufferRef *device_ref;
++    AVCUDADeviceContext *hwctx;
++    CUstream cu_stream;
++    CUmodule cu_module;
++    CUfunction cu_func_uchar;
++    CUfunction cu_func_ushort;
++    CUfunction cu_func;           ///< kernel for the sample size of the input
++    CUdeviceptr line_sum;         ///< row sums followed by column sums
++    uint32_t *line_sum_host;      ///< page-locked copy of line_sum
++    int shift;
++
++    int x1, y1, x2, y2;
++    float limit;
++    float limit_upscaled;
++    int round;
++    int skip;
++    int reset_count;
++    int frame_nb;
++    int max_outliers;
++    int bitdepth;
++} CropDetectCUDAContext;
++
++static av_cold int cropdetect_cuda_init(AVFilterContext *ctx)
++{
++    CropDetectCUDAContext *s = ctx->priv;
++
++    s->frame_nb = -1 * s->skip;
++
++    av_log(ctx, AV_LOG_VERBOSE, "limit:%f round:%d skip:%d reset_count:%d\n",
++           s->limit, s->round, s->skip, s->reset_count);
++
++    return 0;
++}
++
++static av_cold void cropdetect_cuda_uninit(AVFilterContext *ctx)
++{
++    CropDetectCUDAContext *s = ctx->priv;
++
++    if (s->hwctx) {
++        CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx));
++        if (s->line_sum)
++            CHECK_CU(cu->cuMemFree(s->line_sum));
++        if (s->line_sum_host)
++            CHECK_CU(cu->cuMemFreeHost(s->line_sum_host));
++        if (s->cu_module)
++            CHECK_CU(cu->cuModuleUnload(s->cu_module));
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    s->hwctx = NULL;
++    av_buffer_unref(&s->device_ref);
++}
++
++static av_cold int cropdetect_cuda_load_functions(AVFilterContext *ctx,
++                                                  size_t sum_size)
++{
++    CropDetectCUDAContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    CUcontext dummy;
++    void *line_sum_host;
++    int ret;
++
++    extern const unsigned char ff_vf_cropdetect_cuda_ptx_data[];
++    extern const unsigned int ff_vf_cropdetect_cuda_ptx_len;
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx));
++    if (ret < 0)
++        return ret;
++
++    ret = ff_cuda_load_module(ctx, s->hwctx, &s->cu_module,
++                              ff_vf_cropdetect_cuda_ptx_data,
++                              ff_vf_cropdetect_cuda_ptx_len);
++    if (ret < 0)
++        goto end;
++
++    ret = CHECK_CU(cu->cuModuleGetFunction(&s->cu_func_uchar, s->cu_module,
++                                           "cropdetect_uchar"));
++    if (ret < 0)
++        goto end;
++
++    ret = CHECK_CU(cu->cuModuleGetFunction(&s->cu_func_ushort, s->cu_module,
++                                           "cropdetect_ushort"));
++    if (ret < 0)
++        goto end;
++
++    ret = CHECK_CU(cu->cuMemAlloc(&s->line_sum, sum_size));
++    if (ret < 0)
++        goto end;
++
++    ret = CHECK_CU(cu->cuMemHostAlloc(&line_sum_host, sum_size, 0));
++    if (ret < 0)
++        goto end;
++    s->line_sum_host = line_sum_host;
++
++end:
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++
++    return ret;
++}
++
++static int cropdetect_cuda_config_props(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    CropDetectCUDAContext *s = ctx->priv;
++    AVFilterLink *inlink = ctx->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++    FilterLink *outl = ff_filter_link(outlink);
++    AVHWFramesContext *in_frames_ctx;
++    const AVPixFmtDescriptor *desc;
++    int format_supported = 0;
++    int ret;
++
++    if (!inl->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on input\n");
++        return AVERROR(EINVAL);
++    }
++    in_frames_ctx = (AVHWFramesContext *)inl->hw_frames_ctx->data;
++
++    for (int i = 0; i < FF_ARRAY_ELEMS(supported_formats); i++) {
++        if (in_frames_ctx->sw_format == supported_formats[i]) {
++            format_supported = 1;
++            break;
++        }
++    }
++    if (!format_supported) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input format: %s\n",
++               av_get_pix_fmt_name(in_frames_ctx->sw_format));
++        return AVERROR(ENOSYS);
++    }
++
++    s->device_ref = av_buffer_ref(in_frames_ctx->device_ref);
++    if (!s->device_ref)
++        return AVERROR(ENOMEM);
++    s->hwctx     = ((AVHWDeviceContext *)s->device_ref->data)->hwctx;
++    s->cu_stream = s->hwctx->stream;
++
++    ret = cropdetect_cuda_load_functions(ctx, (inlink->w + inlink->h) *
++                                              sizeof(*s->line_sum_host));
++    if (ret < 0)
++        return ret;
++
++    desc        = av_pix_fmt_desc_get(in_frames_ctx->sw_format);
++    s->cu_func  = desc->comp[0].step == 1 ? s->cu_func_uchar : s->cu_func_ushort;
++    s->shift    = desc->comp[0].shift;
++    s->bitdepth = desc->comp[0].depth;
++
++    if (s->limit < 1.0)
++        s->limit_upscaled = s->limit * ((1 << s->bitdepth) - 1);
++    else
++        s->limit_upscaled = s->limit;
++
++    s->x1 = inlink->w - 1;
++    s->y1 = inlink->h - 1;
++    s->x2 = 0;
++    s->y2 = 0;
++
++    outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++    if (!outl->hw_frames_ctx)
++        return AVERROR(ENOMEM);
++
++    return 0;
++}
++
++static int sum_lines(AVFilterContext *ctx, const AVFrame *in)
++{
++    CropDetectCUDAContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    const AVFilterLink *inlink = ctx->inputs[0];
++    CUdeviceptr src = (CUdeviceptr)in->data[0];
++    int pitch  = in->linesize[0];
++    int width  = inlink->w;
++    int height = inlink->h;
++    int shift  = s->shift;
++    void *args[] = { &src, &pitch, &width, &height, &shift, &s->line_sum };
++    int ret;
++
++    ret = CHECK_CU(cu->cuMemsetD32Async(s->line_sum, 0, width + height,
++                                        s->cu_stream));
++    if (ret < 0)
++        return ret;
++
++    ret = CHECK_CU(cu->cuLaunchKernel(s->cu_func,
++                                      DIV_UP(width, BLOCK_X), DIV_UP(height, BLOCK_Y), 1,
++                                      BLOCK_X, BLOCK_Y, 1,
++                                      0, s->cu_stream, args, NULL));
++    if (ret < 0)
++        return ret;
++
++    ret = CHECK_CU(cu->cuMemcpyDtoHAsync(s->line_sum_host, s->line_sum,
++                                         (width + height) * sizeof(*s->line_sum_host),
++                                         s->cu_stream));
++    if (ret < 0)
++        return ret;
++
++    return CHECK_CU(cu->cuStreamSynchronize(s->cu_stream));
++}
++
++#define SET_META(key, value) \
++    av_dict_set_int(metadata, key, value, 0)
++
++static void evaluate(AVFilterLink *inlink, AVFrame *frame,
++                     const uint32_t *line_sum)
++{
++    AVFilterContext *ctx = inlink->dst;
++    CropDetectCUDAContext *s = ctx->priv;
++    int w, h, x, y, shrink_by;
++    AVDictionary **metadata = &frame->metadata;
++    int outliers, last_y;
++    int limit_upscaled = lrint(s->limit_upscaled);
++    char limit_str[22];
++
++    const int inw = inlink->w;
++    const int inh = inlink->h;
++    const uint32_t *row_sum = line_sum;
++    const uint32_t *col_sum = line_sum + inh;
++
++    /* Reset the crop area every reset_count frames, if reset_count is > 0 */
++    if (s->reset_count > 0 && s->frame_nb > s->reset_count) {
++        s->x1 = inw - 1;
++        s->y1 = inh - 1;
++        s->x2 = 0;
++        s->y2 = 0;
++        s->frame_nb = 1;
++    }
++
++#define FIND(DST, FROM, NOEND, INC, SUM, LEN) \
++    outliers = 0;\
++    for (last_y = y = FROM; NOEND; y = y INC) {\
++        if ((int)(SUM[y] / LEN) > limit_upscaled) {\
++            if (++outliers > s->max_outliers) { \
++                DST = last_y;\
++                break;\
++            }\
++        } else\
++            last_y = y INC;\
++    }
++
++    FIND(s->y1,       0,               y < s->y1, +1, row_sum, inw);
++    FIND(s->y2, inh - 1, y > FFMAX(s->y2, s->y1), -1, row_sum, inw);
++    FIND(s->x1,       0,               y < s->x1, +1, col_sum, inh);
++    FIND(s->x2, inw - 1, y > FFMAX(s->x2, s->x1), -1, col_sum, inh);
++
++    /* round x and y (up), important for yuv colorspaces
++     * make sure they stay rounded! */
++    x = (s->x1+1) & ~1;
++    y = (s->y1+1) & ~1;
++
++    w = s->x2 - x + 1;
++    h = s->y2 - y + 1;
++
++    /* w and h must be divisible by 2 as well because of yuv
++     * colorspace problems. */
++    if (s->round <= 1)
++        s->round = 16;
++    if (s->round % 2)
++        s->round *= 2;
++
++    shrink_by = w % s->round;
++    w -= shrink_by;
++    x += (shrink_by/2 + 1) & ~1;
++
++    shrink_by = h % s->round;
++    h -= shrink_by;
++    y += (shrink_by/2 + 1) & ~1;
++
++    SET_META("lavfi.cropdetect.x1", s->x1);
++    SET_META("lavfi.cropdetect.x2", s->x2);
++    SET_META("lavfi.cropdetect.y1", s->y1);
++    SET_META("lavfi.cropdetect.y2", s->y2);
++    SET_META("lavfi.cropdetect.w",  w);
++    SET_META("lavfi.cropdetect.h",  h);
++    SET_META("lavfi.cropdetect.x",  x);
++    SET_META("lavfi.cropdetect.y",  y);
++
++    snprintf(limit_str, sizeof(limit_str), "%f", s->limit);
++    av_dict_set(metadata, "lavfi.cropdetect.limit", limit_str, 0);
++
++    av_log(ctx, AV_LOG_INFO,
++           "x1:%d x2:%d y1:%d y2:%d w:%d h:%d x:%d y:%d pts:%"PRId64" t:%f limit:%f crop=%d:%d:%d:%d\n",
++           s->x1, s->x2, s->y1, s->y2, w, h, x, y, frame->pts,
++           frame->pts == AV_NOPTS_VALUE ? -1 : frame->pts * av_q2d(inlink->time_base),
++           s->limit, w, h, x, y);
++}
++
++static int cropdetect_cuda_filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    AVFilterContext *ctx = inlink->dst;
++    CropDetectCUDAContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    AVFilterLink *outlink = ctx->outputs[0];
++    CUcontext dummy;
++    int ret;
++
++    /* ignore first s->skip frames */
++    if (++s->frame_nb <= 0)
++        return ff_filter_frame(outlink, in);
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx));
++    if (ret < 0) {
++        av_frame_free(&in);
++        return ret;
++    }
++
++    ret = sum_lines(ctx, in);
++
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++
++    if (ret < 0) {
++        av_frame_free(&in);
++        return ret;
++    }
++
++    evaluate(inlink, in, s->line_sum_host);
++
++    return ff_filter_frame(outlink, in);
++}
++
++static int process_command(AVFilterContext *ctx, const char *cmd, const char *args,
++                           char *res, int res_len, int flags)
++{
++    CropDetectCUDAContext *s = ctx->priv;
++    float old_limit = s->limit;
++    int ret;
++
++    if ((ret = ff_filter_process_command(ctx, cmd, args, res, res_len, flags)) < 0)
++        return ret;
++
++    if (old_limit != s->limit) {
++        if (s->limit < 1.0)
++            s->limit_upscaled = s->limit * ((1 << s->bitdepth) - 1);
++        else
++            s->limit_upscaled = s->limit;
++        s->frame_nb = s->reset_count;
++    }
++
++    return 0;
++}
++
++#define OFFSET(x) offsetof(CropDetectCUDAContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
++#define TFLAGS (FLAGS | AV_OPT_FLAG_RUNTIME_PARAM)
++static const AVOption cropdetect_cuda_options[] = {
++    { "limit", "Threshold below which the pixel is considered black", OFFSET(limit),       AV_OPT_TYPE_FLOAT, { .dbl = 24.0/255 }, 0, 65535, TFLAGS },
++    { "round", "Value by which the width/height should be divisible", OFFSET(round),       AV_OPT_TYPE_INT, { .i64 = 16 }, 0, INT_MAX, FLAGS },
++    { "reset", "Recalculate the crop area after this many frames",    OFFSET(reset_count), AV_OPT_TYPE_INT, { .i64 = 0 },  0, INT_MAX, FLAGS },
++    { "skip",  "Number of initial frames to skip",                    OFFSET(skip),        AV_OPT_TYPE_INT, { .i64 = 2 },  0, INT_MAX, FLAGS },
++    { "reset_count", "Recalculate the crop area after this many frames",OFFSET(reset_count),AV_OPT_TYPE_INT,{ .i64 = 0 },  0, INT_MAX, FLAGS },
++    { "max_outliers", "Threshold count of outliers",                  OFFSET(max_outliers),AV_OPT_TYPE_INT, { .i64 = 0 },  0, INT_MAX, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(cropdetect_cuda);
++
++static const AVFilterPad cropdetect_cuda_inputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .filter_frame = cropdetect_cuda_filter_frame,
++    },
++};
++
++static const AVFilterPad cropdetect_cuda_outputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_VIDEO,
++        .config_props = cropdetect_cuda_config_props,
++    },
++};
++
++const FFFilter ff_vf_cropdetect_cuda = {
++    .p.name          = "cropdetect_cuda",
++    .p.description   = NULL_IF_CONFIG_SMALL("Auto-detect crop size using CUDA."),
++    .p.priv_class    = &cropdetect_cuda_class,
++    .priv_size       = sizeof(CropDetectCUDAContext),
++    .init            = cropdetect_cuda_init,
++    .uninit          = cropdetect_cuda_uninit,
++    FILTER_INPUTS(cropdetect_cuda_inputs),
++    FILTER_OUTPUTS(cropdetect_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .process_command = process_command,
++    .flags_internal  = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_cropdetect_cuda.cu b/libavfilter/vf_cropdetect_cuda.cu
+new file mode 100644
+index 0000000000..b73dff5c82
+--- /dev/null
++++ b/libavfilter/vf_cropdetect_cuda.cu
+@@ -0,0 +1,89 @@
++/*
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with FFmpeg; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++/* Must match the block size of the launch in vf_cropdetect_cuda.c. */
++#define BLOCK_X 32
++#define BLOCK_Y 32
++
++/*
++ * Sums the samples of the luma plane per row and per column. line_sum holds
++ * the height row sums followed by the width column sums.
++ *
++ * Each block stores its tile of samples in shared memory. Then BLOCK_X
++ * threads sum the columns of the tile and BLOCK_Y threads its rows, and add
++ * the partial sums to line_sum.
++ */
++template<typename T>
++__device__ static inline void sum_lines(const unsigned char *src, int pitch,
++                                        int width, int height, int shift,
++                                        unsigned int *line_sum)
++{
++    /* The padding column puts the samples a thread sums along a row
++     * on distinct shared memory banks. */
++    __shared__ unsigned int tile[BLOCK_Y][BLOCK_X + 1];
++
++    const int x = blockIdx.x * BLOCK_X + threadIdx.x;
++    const int y = blockIdx.y * BLOCK_Y + threadIdx.y;
++    const int index = threadIdx.y * BLOCK_X + threadIdx.x;
++
++    tile[threadIdx.y][threadIdx.x] = x < width && y < height ?
++        ((const T *)(src + y * pitch))[x] >> shift : 0;
++
++    __syncthreads();
++
++    if (index < BLOCK_X) {
++        const int column = blockIdx.x * BLOCK_X + index;
++        unsigned int sum = 0;
++
++        if (column >= width)
++            return;
++
++        for (int row = 0; row < BLOCK_Y; row++)
++            sum += tile[row][index];
++        atomicAdd(&line_sum[height + column], sum);
++    } else if (index < BLOCK_X + BLOCK_Y) {
++        const int row = index - BLOCK_X;
++        const int line = blockIdx.y * BLOCK_Y + row;
++        unsigned int sum = 0;
++
++        if (line >= height)
++            return;
++
++        for (int column = 0; column < BLOCK_X; column++)
++            sum += tile[row][column];
++        atomicAdd(&line_sum[line], sum);
++    }
++}
++
++extern "C" {
++
++__global__ void cropdetect_uchar(const unsigned char *src, int pitch,
++                                 int width, int height, int shift,
++                                 unsigned int *line_sum)
++{
++    sum_lines<unsigned char>(src, pitch, width, height, shift, line_sum);
++}
++
++__global__ void cropdetect_ushort(const unsigned char *src, int pitch,
++                                  int width, int height, int shift,
++                                  unsigned int *line_sum)
++{
++    sum_lines<unsigned short>(src, pitch, width, height, shift, line_sum);
++}
++
++}
+-- 
+2.43.0
+
