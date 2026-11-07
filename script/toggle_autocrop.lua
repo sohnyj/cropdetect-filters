@@ -47,16 +47,18 @@ local function is_vulkan_context()
     return gpu_context ~= nil and gpu_context:sub(-#"vk") == "vk"
 end
 
-local function needs_upload()
-    local hwdec = mp.get_property("hwdec-current", "no")
-    return hwdec == "no" or hwdec:sub(-#"-copy") == "-copy"
-end
-
+-- Returns the filter for the frames of the current decoder, and whether they
+-- have to be uploaded to Vulkan first, or nil for other hardware decoders.
 local function detection_filter()
-    if mp.get_property("hwdec-current") == "nvdec" then
-        return "cropdetect_cuda"
+    local hwdec = mp.get_property("hwdec-current", "no")
+    if hwdec == "vulkan" then
+        return "cropdetect_vulkan", false
+    elseif hwdec == "nvdec" then
+        return "cropdetect_cuda", false
+    elseif hwdec == "no" or hwdec:sub(-#"-copy") == "-copy" then
+        return "cropdetect_vulkan", true
     end
-    return "cropdetect_vulkan"
+    return nil
 end
 
 local function is_filter_active(label)
@@ -68,16 +70,23 @@ local function is_filter_active(label)
     return false
 end
 
-local function insert_autocrop()
+-- Returns whether the filters are in the chain.
+local function insert_autocrop(filter, upload)
     if is_filter_active(FILTER_LABEL) then
-        return
+        return true
     end
 
-    if needs_upload() then
-        mp.commandv("vf", "append", string.format(UPLOAD_COMMAND, UPLOAD_LABEL))
+    if upload and not mp.commandv("vf", "append", string.format(UPLOAD_COMMAND, UPLOAD_LABEL)) then
+        return false
     end
-    mp.commandv("vf", "append", string.format(FILTER_COMMAND, FILTER_LABEL,
-        detection_filter(), autocrop_opts.cropdetect_limit, autocrop_opts.cropdetect_round))
+    if not mp.commandv("vf", "append", string.format(FILTER_COMMAND, FILTER_LABEL,
+            filter, autocrop_opts.cropdetect_limit, autocrop_opts.cropdetect_round)) then
+        if upload then
+            mp.commandv("vf", "remove", UPLOAD_LABEL)
+        end
+        return false
+    end
+    return true
 end
 
 local function clamp_autocrop(crop_size, crop_pos, min_size, max_size)
@@ -148,6 +157,8 @@ local function get_detected_crop(cropdetect_metadata)
     local x = tonumber(cropdetect_metadata["lavfi.cropdetect.x"])
     local y = tonumber(cropdetect_metadata["lavfi.cropdetect.y"])
     if not (w and h and x and y) then return nil end
+    -- A black frame has no picture to crop to, so it leaves the crop as it is.
+    if w <= 0 or h <= 0 then return nil end
 
     local crop = { max_w = max_w, max_h = max_h }
     crop.w, crop.x = clamp_autocrop(w, x, max_w * autocrop_opts.min_apply_width, max_w)
@@ -214,10 +225,13 @@ local function unobserve_properties()
     autocrop_state.properties = { speed = 1, seeking = false, pause = false }
 end
 
-local function start_autocrop()
-    insert_autocrop()
+local function start_autocrop(filter, upload)
+    if not insert_autocrop(filter, upload) then
+        return false
+    end
     autocrop_state.debounce_timer = mp.add_timeout(DEBOUNCE_SECONDS, apply_pending_autocrop, true)
     observe_properties()
+    return true
 end
 
 local function cleanup_autocrop()
@@ -236,8 +250,11 @@ local function cleanup_autocrop()
     mp.set_property("file-local-options/video-crop", "")
 end
 
-local function enable_autocrop(suppress_osd)
-    start_autocrop()
+local function enable_autocrop(filter, upload, suppress_osd)
+    if not start_autocrop(filter, upload) then
+        msg.warn("Could not insert " .. filter)
+        return
+    end
     set_active(true)
     if not suppress_osd then
         mp.osd_message(autocrop_opts.osd .. ": yes")
@@ -269,7 +286,12 @@ local function handle_toggle(command, suppress_osd)
     end
 
     if enable then
-        enable_autocrop(suppress_osd)
+        local filter, upload = detection_filter()
+        if not filter then
+            msg.warn("Not available for hwdec=" .. mp.get_property("hwdec-current", "no"))
+            return
+        end
+        enable_autocrop(filter, upload, suppress_osd)
     else
         disable_autocrop(suppress_osd)
     end

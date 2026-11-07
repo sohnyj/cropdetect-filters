@@ -176,6 +176,7 @@ hwdec=vulkan # hwdec=nvdec or hwdec=vulkan,nvdec
   copied**, and no copy-back decoder is needed.
 - With a `*-copy` decoder or the software decoder (`no`), they are uploaded to
   Vulkan first.
+- Other hardware decoders, such as `d3d11va` or `vaapi`, are not supported.
 
 `input.conf`:
 
