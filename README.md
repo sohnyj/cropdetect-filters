@@ -1,4 +1,4 @@
-# cropdetect-vk
+# cropdetect-filters
 
 `cropdetect_vulkan` and `cropdetect_cuda`, Vulkan and CUDA ports of FFmpeg's
 `cropdetect` filter, as patches for FFmpeg, and an mpv script that uses them to
