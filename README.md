@@ -1,8 +1,12 @@
 # cropdetect-filters
 
-`cropdetect_vulkan` and `cropdetect_cuda`, Vulkan and CUDA ports of FFmpeg's
-`cropdetect` filter, as patches for FFmpeg, and an mpv script that uses them to
-crop black bars during playback.
+`cropdetect_vulkan` and `cropdetect_cuda` are Vulkan and CUDA ports of
+FFmpeg's `cropdetect` filter, provided as FFmpeg patches with an mpv script
+that uses them to crop black bars during playback. Unlike `cropdetect`, the
+filters read the frames on the GPU where they were decoded, so the frames are
+not copied back to system memory; only the sums of their rows and columns are.
+
+The filters and the script have been tested on Windows with an NVIDIA GPU.
 
 ## cropdetect_vulkan
 
@@ -31,10 +35,8 @@ non-black area of the input video. The frames are passed on unchanged.
 - RGB, XYZ, packed and floating-point formats are rejected.
 
 As with the other Vulkan filters, a hardware device has to be initialized and
-passed to the filter graph; see "Vulkan Video Filters" in the FFmpeg filters
-documentation.
-
-It has been tested on Windows with an NVIDIA GPU.
+passed to the filter graph; see
+[Vulkan Video Filters](https://ffmpeg.org/ffmpeg-filters.html#Vulkan-Video-Filters).
 
 ### Options
 
@@ -72,8 +74,7 @@ It accepts the following parameters:
 - `max_outliers`
 
   Set the number of non-black lines that may be passed over while searching
-  from an edge towards the picture. Default value is 0, which stops at the
-  first non-black line.
+  from an edge towards the picture. Default value is 0.
 
 ### Examples
 
@@ -102,10 +103,9 @@ This filter supports the following commands:
 
 Auto-detect the crop size on CUDA frames, such as those decoded with nvdec.
 
-It is the same filter as `cropdetect_vulkan` for CUDA: the metadata, the log
-line, the options and the commands are those of `cropdetect_vulkan` above. A
-CUDA kernel sums the luma plane per row and per column, and only these sums are
-read back.
+It works like `cropdetect_vulkan` on CUDA frames, with the same metadata, log
+line, options and commands. A CUDA kernel sums the luma plane per row and per
+column, and only these sums are read back.
 
 ### Supported input
 
@@ -128,36 +128,29 @@ to the filter graph.
 ## Building
 
 The patches are made against FFmpeg master, and either or both can be applied.
-Apply each with the script next to it, which keeps working when FFmpeg changes
-the lines around the ones that register the filter:
+Apply each with the script next to it:
 
 ```
 cmake -DSOURCE_DIR=<ffmpeg> -P patch/ffmpeg-add-cropdetect_vulkan-filter.cmake
 cmake -DSOURCE_DIR=<ffmpeg> -P patch/ffmpeg-add-cropdetect_cuda-filter.cmake
 ```
 
-Then configure FFmpeg with `--enable-gpl` and:
+Then configure FFmpeg with `--enable-gpl`, and:
 
-- for `cropdetect_vulkan`, `--enable-vulkan`, with a SPIR-V compiler (`glslc`,
-  `glslang` or `glslangValidator`) available at build time;
-- for `cropdetect_cuda`, `--enable-cuda-llvm`, with clang and the
+- For `cropdetect_vulkan`, add `--enable-vulkan`, and have a SPIR-V compiler
+  (`glslc`, `glslang` or `glslangValidator`) available at build time.
+- For `cropdetect_cuda`, add `--enable-cuda-llvm`, and have clang and the
   [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) available at
   build time. `--enable-cuda-nvcc` works too, but needs `--enable-nonfree`,
   which makes the binaries unredistributable.
-
-The CUDA patch also defines `__shared__` in `compat/cuda/cuda_runtime.h`, which
-the clang build of the kernels needs, as no kernel in FFmpeg used shared memory
-before.
 
 Patched binaries are at [sohnyj/mpv-winbuild](https://github.com/sohnyj/mpv-winbuild).
 
 ## mpv script
 
 `script/toggle_autocrop.lua` inserts `cropdetect_vulkan` or `cropdetect_cuda`
-and applies the detected area through `video-crop`.
-
-It applies a dynamic crop that follows aspect ratio changes during playback,
-such as those of IMAX films.
+and applies the detected area through `video-crop`, following aspect ratio
+changes during playback, such as those of IMAX films.
 
 ### Usage
 
@@ -171,9 +164,10 @@ hwdec=vulkan # hwdec=nvdec or hwdec=vulkan,nvdec
 ```
 
 - `gpu-api=vulkan` is required.
-- With `hwdec=vulkan`, which uses `cropdetect_vulkan`, or `hwdec=nvdec`, which
-  uses `cropdetect_cuda`, **the frames are read on the GPU without being
-  copied**, and no copy-back decoder is needed.
+- `hwdec=vulkan` uses `cropdetect_vulkan`, and `hwdec=nvdec` uses
+  `cropdetect_cuda`.
+- With these, **the frames are read on the GPU without being copied**, and no
+  copy-back decoder is needed.
 - With a `*-copy` decoder or the software decoder (`no`), they are uploaded to
   Vulkan first.
 - Other hardware decoders, such as `d3d11va` or `vaapi`, are not supported.
@@ -190,7 +184,7 @@ KEY script-message toggle_autocrop
 Autocrop	script-message toggle_autocrop	checked=p["user-data/filter/autocrop"]
 ```
 
-`script/toggle_autocrop.conf` is an example for `script-opts`.
+`script/toggle_autocrop.conf` is an example for mpv's `script-opts` directory.
 
 To print the detected area without the script:
 
