@@ -175,6 +175,8 @@ local function update_autocrop()
     local crop = get_detected_crop(state.metadata)
     if crop then
         debounce_crop(crop)
+    else
+        cancel_pending_crop()
     end
 end
 
