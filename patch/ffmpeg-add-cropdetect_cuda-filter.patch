@@ -1,4 +1,4 @@
-From 37cbdb8cec661522dd995630ca1590463261eae0 Mon Sep 17 00:00:00 2001
+From d2c07d6f060d6d470b7bdbec9ae19c7a181d9d0c Mon Sep 17 00:00:00 2001
 From: sohnyj <271139641+sohnyj@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 17:54:29 +0000
 Subject: [PATCH] avfilter: add cropdetect_cuda filter
@@ -24,9 +24,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  doc/filters.texi                  |  58 ++++
  libavfilter/Makefile              |   2 +
  libavfilter/allfilters.c          |   1 +
- libavfilter/vf_cropdetect_cuda.c  | 468 ++++++++++++++++++++++++++++++
+ libavfilter/vf_cropdetect_cuda.c  | 469 ++++++++++++++++++++++++++++++
  libavfilter/vf_cropdetect_cuda.cu |  89 ++++++
- 7 files changed, 621 insertions(+)
+ 7 files changed, 622 insertions(+)
  create mode 100644 libavfilter/vf_cropdetect_cuda.c
  create mode 100644 libavfilter/vf_cropdetect_cuda.cu
 
@@ -151,10 +151,10 @@ index 9f07bf83dc..e1279d0727 100644
  extern const FFFilter ff_vf_datascope;
 diff --git a/libavfilter/vf_cropdetect_cuda.c b/libavfilter/vf_cropdetect_cuda.c
 new file mode 100644
-index 0000000000..9963ea370c
+index 0000000000..ba8d66516e
 --- /dev/null
 +++ b/libavfilter/vf_cropdetect_cuda.c
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,469 @@
 +/*
 + * This file is part of FFmpeg.
 + *
@@ -341,6 +341,14 @@ index 0000000000..9963ea370c
 +    return ret;
 +}
 +
++static int format_is_supported(enum AVPixelFormat fmt)
++{
++    for (int i = 0; i < FF_ARRAY_ELEMS(supported_formats); i++)
++        if (supported_formats[i] == fmt)
++            return 1;
++    return 0;
++}
++
 +static int cropdetect_cuda_config_props(AVFilterLink *outlink)
 +{
 +    AVFilterContext *ctx = outlink->src;
@@ -350,7 +358,6 @@ index 0000000000..9963ea370c
 +    FilterLink *outl = ff_filter_link(outlink);
 +    AVHWFramesContext *in_frames_ctx;
 +    const AVPixFmtDescriptor *desc;
-+    int format_supported = 0;
 +    int ret;
 +
 +    if (!inl->hw_frames_ctx) {
@@ -359,13 +366,7 @@ index 0000000000..9963ea370c
 +    }
 +    in_frames_ctx = (AVHWFramesContext *)inl->hw_frames_ctx->data;
 +
-+    for (int i = 0; i < FF_ARRAY_ELEMS(supported_formats); i++) {
-+        if (in_frames_ctx->sw_format == supported_formats[i]) {
-+            format_supported = 1;
-+            break;
-+        }
-+    }
-+    if (!format_supported) {
++    if (!format_is_supported(in_frames_ctx->sw_format)) {
 +        av_log(ctx, AV_LOG_ERROR, "Unsupported input format: %s\n",
 +               av_get_pix_fmt_name(in_frames_ctx->sw_format));
 +        return AVERROR(ENOSYS);
