@@ -250,54 +250,63 @@ local function cleanup_autocrop()
     mp.set_property("file-local-options/video-crop", "")
 end
 
-local function enable_autocrop(filter_name, needs_upload, suppress_osd)
+local function enable_autocrop()
+    if mp.get_property_native("current-tracks/video/image") then
+        msg.warn("Not available for image files")
+        return false
+    end
+
+    if not is_vulkan_context() then
+        msg.warn("Requires gpu-context=winvk, waylandvk or x11vk")
+        return false
+    end
+
+    local filter_name, needs_upload = get_detection_filter()
+    if not filter_name then
+        msg.warn("Not available for hwdec=" .. mp.get_property("hwdec-current", "no"))
+        return false
+    end
+
     if not start_autocrop(filter_name, needs_upload) then
         msg.warn("Could not insert " .. filter_name)
-        return
+        return false
     end
     set_active(true)
-    if not suppress_osd then
-        mp.osd_message(autocrop_opts.osd .. ": yes")
-    end
+    return true
 end
 
-local function disable_autocrop(suppress_osd)
+local function disable_autocrop()
     cleanup_autocrop()
     set_active(false)
-    if not suppress_osd then
-        mp.osd_message(autocrop_opts.osd .. ": no")
-    end
 end
 
-local function handle_toggle(operation, suppress_osd)
-    local enable = operation == "enable" or (operation == nil and not autocrop_state.active)
+-- Returns whether the state has changed to the requested one.
+local function set_autocrop(enable)
     if enable == autocrop_state.active then
-        return
+        return false
     end
 
-    if enable and mp.get_property_native("current-tracks/video/image") then
-        msg.warn("Not available for image files")
-        return
+    if enable then
+        return enable_autocrop()
     end
+    disable_autocrop()
+    return true
+end
 
-    if enable and not is_vulkan_context() then
-        msg.warn("Requires gpu-context=winvk, waylandvk or x11vk")
+local function handle_toggle(operation)
+    local enable = operation == "enable" or (operation == nil and not autocrop_state.active)
+    if not set_autocrop(enable) then
         return
     end
 
     if enable then
-        local filter_name, needs_upload = get_detection_filter()
-        if not filter_name then
-            msg.warn("Not available for hwdec=" .. mp.get_property("hwdec-current", "no"))
-            return
-        end
-        enable_autocrop(filter_name, needs_upload, suppress_osd)
+        mp.osd_message(autocrop_opts.osd .. ": yes")
     else
-        disable_autocrop(suppress_osd)
+        mp.osd_message(autocrop_opts.osd .. ": no")
     end
 end
 
-mp.add_hook("on_unload", 50, function() handle_toggle("disable", true) end)
+mp.add_hook("on_unload", 50, function() set_autocrop(false) end)
 mp.register_script_message("toggle_autocrop", handle_toggle)
-mp.register_script_message("enable", function() handle_toggle("enable", true) end)
-mp.register_script_message("disable", function() handle_toggle("disable", true) end)
+mp.register_script_message("enable_autocrop", function() set_autocrop(true) end)
+mp.register_script_message("disable_autocrop", function() set_autocrop(false) end)
