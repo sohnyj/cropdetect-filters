@@ -12,19 +12,19 @@ local autocrop_opts = {
     label = "autocrop",
     cropdetect_limit = "24/255",
     cropdetect_round = 16,
-    min_apply_width = 0.5,
-    min_apply_height = 0.5,
+    min_crop_width = 0.5,
+    min_crop_height = 0.5,
     symmetry_ratio = 0.75,
     crop_tolerance = 0.01,
 }
 options.read_options(autocrop_opts)
 
-local FILTER_LABEL = "@" .. autocrop_opts.label
+local CROPDETECT_LABEL = "@" .. autocrop_opts.label
 local UPLOAD_LABEL = "@" .. autocrop_opts.label .. "_upload"
-local FILTER_COMMAND = "%s:%s=limit=%s:reset=1:round=%d" -- reset=1 detects each frame on its own
-local UPLOAD_COMMAND = "%s:format=fmt=vulkan" -- uploads software frames to Vulkan
+local CROPDETECT_FILTER = "%s:%s=limit=%s:reset=1:round=%d" -- reset=1 detects each frame on its own
+local UPLOAD_FILTER = "%s:format=fmt=vulkan" -- uploads software frames to Vulkan
 local DEBOUNCE_SECONDS = 0.3 -- time a detected crop must stay unchanged before it is applied
-local MAX_DETECT_SPEED = 2.0 -- playback speed above which detection is skipped
+local MAX_DETECTION_SPEED = 2.0 -- playback speed above which detection is skipped
 
 local autocrop_state = {
     active = false,
@@ -49,7 +49,7 @@ end
 
 -- Returns the filter for the frames of the current decoder, and whether they
 -- have to be uploaded to Vulkan first, or nil for other hardware decoders.
-local function detection_filter()
+local function get_detection_filter()
     local hwdec = mp.get_property("hwdec-current", "no")
     if hwdec == "vulkan" then
         return "cropdetect_vulkan", false
@@ -61,7 +61,7 @@ local function detection_filter()
     return nil
 end
 
-local function is_filter_active(label)
+local function has_filter(label)
     for _, filter in ipairs(mp.get_property_native("vf") or {}) do
         if "@" .. (filter.label or "") == label then
             return true
@@ -71,17 +71,17 @@ local function is_filter_active(label)
 end
 
 -- Returns whether the filters are in the chain.
-local function insert_autocrop(filter, upload)
-    if is_filter_active(FILTER_LABEL) then
+local function insert_autocrop(filter_name, needs_upload)
+    if has_filter(CROPDETECT_LABEL) then
         return true
     end
 
-    if upload and not mp.commandv("vf", "append", string.format(UPLOAD_COMMAND, UPLOAD_LABEL)) then
+    if needs_upload and not mp.commandv("vf", "append", string.format(UPLOAD_FILTER, UPLOAD_LABEL)) then
         return false
     end
-    if not mp.commandv("vf", "append", string.format(FILTER_COMMAND, FILTER_LABEL,
-            filter, autocrop_opts.cropdetect_limit, autocrop_opts.cropdetect_round)) then
-        if upload then
+    if not mp.commandv("vf", "append", string.format(CROPDETECT_FILTER, CROPDETECT_LABEL,
+            filter_name, autocrop_opts.cropdetect_limit, autocrop_opts.cropdetect_round)) then
+        if needs_upload then
             mp.commandv("vf", "remove", UPLOAD_LABEL)
         end
         return false
@@ -89,7 +89,7 @@ local function insert_autocrop(filter, upload)
     return true
 end
 
-local function clamp_autocrop(crop_size, crop_pos, min_size, max_size)
+local function clamp_crop(crop_size, crop_pos, min_size, max_size)
     if max_size - crop_size <= max_size * autocrop_opts.crop_tolerance then
         return max_size, 0
     end
@@ -112,7 +112,7 @@ local function is_same_crop(crop, other)
         and math.abs(crop.h - other.h) <= tolerance_h and math.abs(crop.y - other.y) <= tolerance_h
 end
 
-local function apply_autocrop(crop)
+local function apply_crop(crop)
     if crop.w == crop.max_w and crop.h == crop.max_h then
         mp.set_property("file-local-options/video-crop", "")
     else
@@ -120,13 +120,13 @@ local function apply_autocrop(crop)
     end
 end
 
-local function apply_pending_autocrop()
+local function apply_pending_crop()
     autocrop_state.applied = autocrop_state.pending
     autocrop_state.pending = nil
-    apply_autocrop(autocrop_state.applied)
+    apply_crop(autocrop_state.applied)
 end
 
-local function cancel_pending_autocrop()
+local function cancel_pending_crop()
     autocrop_state.pending = nil
     if autocrop_state.debounce_timer then
         autocrop_state.debounce_timer:kill()
@@ -134,10 +134,10 @@ local function cancel_pending_autocrop()
 end
 
 -- Applies a detected crop once it has not changed for DEBOUNCE_SECONDS.
-local function debounce_autocrop(crop)
+local function debounce_crop(crop)
     local state = autocrop_state
     if state.applied and is_same_crop(crop, state.applied) then
-        cancel_pending_autocrop()
+        cancel_pending_crop()
     elseif not state.pending or not is_same_crop(crop, state.pending) then
         state.pending = crop
         state.debounce_timer:kill()
@@ -161,20 +161,20 @@ local function get_detected_crop(cropdetect_metadata)
     if w <= 0 or h <= 0 then return nil end
 
     local crop = { max_w = max_w, max_h = max_h }
-    crop.w, crop.x = clamp_autocrop(w, x, max_w * autocrop_opts.min_apply_width, max_w)
-    crop.h, crop.y = clamp_autocrop(h, y, max_h * autocrop_opts.min_apply_height, max_h)
+    crop.w, crop.x = clamp_crop(w, x, max_w * autocrop_opts.min_crop_width, max_w)
+    crop.h, crop.y = clamp_crop(h, y, max_h * autocrop_opts.min_crop_height, max_h)
     return crop
 end
 
 local function update_autocrop()
     local state = autocrop_state
-    if not state.metadata or state.properties.seeking or state.properties.speed > MAX_DETECT_SPEED then
+    if not state.metadata or state.properties.seeking or state.properties.speed > MAX_DETECTION_SPEED then
         return
     end
 
     local crop = get_detected_crop(state.metadata)
     if crop then
-        debounce_autocrop(crop)
+        debounce_crop(crop)
     end
 end
 
@@ -185,8 +185,8 @@ end
 
 local function handle_speed(_, value)
     autocrop_state.properties.speed = value
-    if value > MAX_DETECT_SPEED then
-        cancel_pending_autocrop()
+    if value > MAX_DETECTION_SPEED then
+        cancel_pending_crop()
     else
         update_autocrop()
     end
@@ -195,7 +195,7 @@ end
 local function handle_seeking(_, value)
     autocrop_state.properties.seeking = value
     if value then
-        cancel_pending_autocrop()
+        cancel_pending_crop()
     else
         update_autocrop()
     end
@@ -225,34 +225,34 @@ local function unobserve_properties()
     autocrop_state.properties = { speed = 1, seeking = false, pause = false }
 end
 
-local function start_autocrop(filter, upload)
-    if not insert_autocrop(filter, upload) then
+local function start_autocrop(filter_name, needs_upload)
+    if not insert_autocrop(filter_name, needs_upload) then
         return false
     end
-    autocrop_state.debounce_timer = mp.add_timeout(DEBOUNCE_SECONDS, apply_pending_autocrop, true)
+    autocrop_state.debounce_timer = mp.add_timeout(DEBOUNCE_SECONDS, apply_pending_crop, true)
     observe_properties()
     return true
 end
 
 local function cleanup_autocrop()
     unobserve_properties()
-    cancel_pending_autocrop()
+    cancel_pending_crop()
     autocrop_state.debounce_timer = nil
     autocrop_state.metadata = nil
     autocrop_state.applied = nil
 
-    if is_filter_active(FILTER_LABEL) then
-        mp.commandv("vf", "remove", FILTER_LABEL)
+    if has_filter(CROPDETECT_LABEL) then
+        mp.commandv("vf", "remove", CROPDETECT_LABEL)
     end
-    if is_filter_active(UPLOAD_LABEL) then
+    if has_filter(UPLOAD_LABEL) then
         mp.commandv("vf", "remove", UPLOAD_LABEL)
     end
     mp.set_property("file-local-options/video-crop", "")
 end
 
-local function enable_autocrop(filter, upload, suppress_osd)
-    if not start_autocrop(filter, upload) then
-        msg.warn("Could not insert " .. filter)
+local function enable_autocrop(filter_name, needs_upload, suppress_osd)
+    if not start_autocrop(filter_name, needs_upload) then
+        msg.warn("Could not insert " .. filter_name)
         return
     end
     set_active(true)
@@ -269,8 +269,8 @@ local function disable_autocrop(suppress_osd)
     end
 end
 
-local function handle_toggle(command, suppress_osd)
-    local enable = command == "enable" or (command == nil and not autocrop_state.active)
+local function handle_toggle(operation, suppress_osd)
+    local enable = operation == "enable" or (operation == nil and not autocrop_state.active)
     if enable == autocrop_state.active then
         return
     end
@@ -286,12 +286,12 @@ local function handle_toggle(command, suppress_osd)
     end
 
     if enable then
-        local filter, upload = detection_filter()
-        if not filter then
+        local filter_name, needs_upload = get_detection_filter()
+        if not filter_name then
             msg.warn("Not available for hwdec=" .. mp.get_property("hwdec-current", "no"))
             return
         end
-        enable_autocrop(filter, upload, suppress_osd)
+        enable_autocrop(filter_name, needs_upload, suppress_osd)
     else
         disable_autocrop(suppress_osd)
     end
