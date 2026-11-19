@@ -191,3 +191,7 @@ To print the detected area without the script:
 ```
 .\mpv.com --vo=gpu-next --gpu-api=vulkan --hwdec=vulkan --vf=lavfi=[cropdetect_vulkan] -v file.mkv
 ```
+
+## License
+
+Licensed under the GNU General Public License v3.0 or later.
